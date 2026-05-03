@@ -54,9 +54,19 @@ class VerifyCodeRequest(BaseModel):
     email: EmailStr
     code: str
 
-
 class VerifyCodeResponse(BaseModel):
     """Schema for verification code response"""
     message: str
-    user_id: int
-    requires_email_verification: bool
+
+
+class ForgotPasswordSendCodeRequest(BaseModel):
+    """Schema for sending forgot password code"""
+    email: EmailStr
+
+
+class ForgotPasswordResetRequest(BaseModel):
+    """Schema for resetting password"""
+    email: EmailStr
+    code: str
+    new_password: str
+    confirm_password: str

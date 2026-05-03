@@ -13,6 +13,7 @@ class Settings(BaseSettings):
 
     # Database
     DATABASE_HOST: str
+    DATABASE_PORT: int = 3306
     DATABASE_USER: str
     DATABASE_PASSWORD: str
     DATABASE_NAME: str
@@ -25,6 +26,12 @@ class Settings(BaseSettings):
 
     # CORS
     CORS_ORIGINS: str = '["http://localhost:5173", "http://localhost:3000", "http://localhost:8000"]'
+
+    # Gemini AI (for chatbot)
+    GEMINI_KEY: str = ""
+
+    # Tavily (online search fallback when DB data is insufficient)
+    TAVILY_API_KEY: str = ""
 
     # Email Configuration (Gmail SMTP)
     GMAIL_SENDER_EMAIL: str = "your-email@gmail.com"

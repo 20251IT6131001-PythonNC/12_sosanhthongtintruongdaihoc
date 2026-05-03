@@ -1,122 +1,67 @@
 """
-Country Model - Data access layer for countries table.
-Adapted from existing models/CountryModel.py
+Country Model - Data access layer for countries table (SQLAlchemy ORM).
 """
-from app.database import execute_query
-from typing import Optional, Dict, Any, List
+from sqlalchemy.orm import Session
+from sqlalchemy import func
+from app.entities.country import Country
+from app.entities.enums import REGION_LABELS
+from typing import Optional, List
 
 
 class CountryModel:
     """Country data access layer"""
 
     @staticmethod
-    def get_by_id(country_id: int) -> Optional[Dict[str, Any]]:
-        """
-        Get country by ID.
-
-        Args:
-            country_id: Country ID
-
-        Returns:
-            Country dict if found, None otherwise
-        """
-        try:
-            sql = "SELECT id, name FROM countries WHERE id = %s"
-            result = execute_query(sql, (country_id,), fetch=True, fetch_one=True)
-            return result
-        except Exception as e:
-            print(f"Error getting country: {e}")
-            return None
+    def get_by_id(db: Session, country_id: int) -> Optional[Country]:
+        return db.query(Country).filter(Country.id == country_id).first()
 
     @staticmethod
-    def get_by_name(name: str) -> Optional[Dict[str, Any]]:
-        """
-        Get country by name (case-insensitive).
-
-        Args:
-            name: Country name
-
-        Returns:
-            Country dict if found, None otherwise
-        """
-        try:
-            sql = "SELECT id, name FROM countries WHERE LOWER(name) = LOWER(%s)"
-            result = execute_query(sql, (name,), fetch=True, fetch_one=True)
-            return result
-        except Exception as e:
-            print(f"Error getting country by name: {e}")
-            return None
+    def get_by_name(db: Session, name: str) -> Optional[Country]:
+        return (
+            db.query(Country)
+            .filter(func.lower(Country.name) == name.lower())
+            .first()
+        )
 
     @staticmethod
-    def search_by_name(name: str) -> List[Dict[str, Any]]:
-        """
-        Search countries by name (partial match).
-
-        Args:
-            name: Country name or part of it
-
-        Returns:
-            List of matching countries
-        """
-        try:
-            search_pattern = f"%{name}%"
-            sql = "SELECT id, name FROM countries WHERE LOWER(name) LIKE LOWER(%s) ORDER BY name ASC LIMIT 50"
-            results = execute_query(sql, (search_pattern,), fetch=True)
-            return results or []
-        except Exception as e:
-            print(f"Error searching countries: {e}")
-            return []
+    def search_by_name(db: Session, name: str) -> List[dict]:
+        results = (
+            db.query(Country)
+            .filter(Country.name.ilike(f"%{name}%"))
+            .order_by(Country.name)
+            .limit(50)
+            .all()
+        )
+        return [r.to_dict() for r in results]
 
     @staticmethod
-    def get_all() -> List[Dict[str, Any]]:
-        """
-        Get all countries.
-
-        Returns:
-            List of all countries sorted by name
-        """
-        try:
-            sql = "SELECT id, name FROM countries ORDER BY name ASC"
-            results = execute_query(sql, fetch=True)
-            return results or []
-        except Exception as e:
-            print(f"Error getting all countries: {e}")
-            return []
+    def get_all(db: Session) -> List[dict]:
+        results = db.query(Country).order_by(Country.name).all()
+        return [r.to_dict() for r in results]
 
     @staticmethod
-    def get_id_by_name(name: str) -> Optional[int]:
-        """
-        Get country ID by name (case-insensitive).
-        Backward compatible with old model.
-
-        Args:
-            name: Country name
-
-        Returns:
-            Country ID if found, None otherwise
-        """
-        try:
-            country = CountryModel.get_by_name(name)
-            return country['id'] if country else None
-        except Exception as e:
-            print(f"Error getting country ID: {e}")
-            return None
+    def get_id_by_name(db: Session, name: str) -> Optional[int]:
+        country = CountryModel.get_by_name(db, name)
+        return country.id if country else None
 
     @staticmethod
-    def get_name_by_id(country_id: int) -> Optional[str]:
-        """
-        Get country name by ID.
-        Backward compatible with old model.
+    def get_by_region_id(db: Session, region_id: int) -> List[dict]:
+        results = (
+            db.query(Country)
+            .filter(Country.region_id == region_id)
+            .order_by(Country.name)
+            .all()
+        )
+        return [r.to_dict() for r in results]
 
-        Args:
-            country_id: Country ID
-
-        Returns:
-            Country name if found, None otherwise
-        """
-        try:
-            country = CountryModel.get_by_id(country_id)
-            return country['name'] if country else None
-        except Exception as e:
-            print(f"Error getting country name: {e}")
-            return None
+    @staticmethod
+    def get_all_regions(db: Session) -> List[dict]:
+        """Return list of {id, name} for all regions that have at least one country."""
+        used_ids = (
+            db.query(Country.region_id)
+            .filter(Country.region_id.isnot(None))
+            .distinct()
+            .all()
+        )
+        ids = sorted({row[0] for row in used_ids})
+        return [{"id": rid, "name": REGION_LABELS[rid]} for rid in ids if rid in REGION_LABELS]

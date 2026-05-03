@@ -2,7 +2,8 @@
 Authentication API routes.
 Handles signup, login, token refresh, and logout.
 """
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status, Depends
+from sqlalchemy.orm import Session
 from app.schemas.auth import (
     LoginRequest,
     Token,
@@ -12,7 +13,9 @@ from app.schemas.auth import (
     SendVerificationCodeRequest,
     SendVerificationCodeResponse,
     VerifyCodeRequest,
-    VerifyCodeResponse
+    VerifyCodeResponse,
+    ForgotPasswordSendCodeRequest,
+    ForgotPasswordResetRequest
 )
 from app.schemas.user import UserResponse
 from app.models.user import UserModel
@@ -20,16 +23,19 @@ from app.models.study_bg import StudyBGModel
 from app.utils.security import verify_password
 from app.utils.auth import create_access_token, create_refresh_token, verify_token
 from app.utils.email import send_verification_code_email
-from app.utils.verification import generate_verification_code, store_verification_code, verify_code, cleanup_expired_codes
-from app.database import execute_query
+from app.database import execute_query, get_db
+from app.utils.rate_limit import limiter
 from datetime import datetime, timedelta
 from app.config import settings
+import random
+import string
 
 router = APIRouter()
 
 
 @router.post("/signup", response_model=SendVerificationCodeResponse, status_code=status.HTTP_201_CREATED)
-async def signup(user_data: SendVerificationCodeRequest):
+@limiter.limit("3/minute")
+async def signup(request: Request, user_data: SendVerificationCodeRequest, db: Session = Depends(get_db)):
     """
     Send verification code to email for signup.
     Does NOT create user yet - only sends code and stores data temporarily.
@@ -45,124 +51,77 @@ async def signup(user_data: SendVerificationCodeRequest):
         HTTPException 500: If error occurs
     """
     try:
-        # Check if email already exists
-        existing_user = UserModel.get_user_by_email(user_data.email)
-        if existing_user:
+        # Generate OTP and store directly in DB (safe across server restarts)
+        code = ''.join(random.choices(string.digits, k=6))
+        expiry = datetime.now() + timedelta(minutes=10)
+
+        ok, err = UserModel.create_pending_user(
+            db,
+            first_name=user_data.first_name,
+            last_name=user_data.last_name,
+            email=user_data.email,
+            password=user_data.password,
+            code=code,
+            expiry=expiry,
+        )
+        if not ok:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Email already registered"
+                status_code=(
+                    status.HTTP_400_BAD_REQUEST
+                    if "already registered" in err
+                    else status.HTTP_500_INTERNAL_SERVER_ERROR
+                ),
+                detail=err,
             )
 
-        # Generate 6-digit code
-        code = generate_verification_code()
-        print(f"Generated verification code: {code} for email: {user_data.email}")
-
-        # Store user data and code temporarily
-        user_data_dict = {
-            'first_name': user_data.first_name,
-            'last_name': user_data.last_name,
-            'email': user_data.email,
-            'password': user_data.password
-        }
-
-        success = store_verification_code(user_data.email, user_data_dict, code, expiry_minutes=10)
-
-        if not success:
-            print(f"Failed to store verification code")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Error processing signup"
-            )
-
-        print(f"Attempting to send verification email to {user_data.email}")
-        # Send verification code email
         email_sent = send_verification_code_email(user_data.email, user_data.first_name, code)
-
         if not email_sent:
-            print(f"Failed to send verification email")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Error sending verification code. Please check your email configuration."
+                detail="Error sending verification code. Please check your email configuration.",
             )
 
-        print(f"Verification code email sent successfully to {user_data.email}")
         return SendVerificationCodeResponse(
             message="Verification code sent to your email",
-            email=user_data.email
+            email=user_data.email,
         )
 
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Unexpected error in signup: {str(e)}")
         import traceback
         traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error: {str(e)}"
+            detail=f"Error: {str(e)}",
         )
 
 
 @router.post("/verify-signup-code", response_model=VerifyCodeResponse, status_code=status.HTTP_201_CREATED)
-async def verify_signup_code(request: VerifyCodeRequest):
+@limiter.limit("5/10minutes")
+async def verify_signup_code(request: Request, body: VerifyCodeRequest, db: Session = Depends(get_db)):
     """
-    Verify signup code and create user account.
-
-    Args:
-        request: VerifyCodeRequest with email and code
-
-    Returns:
-        VerifyCodeResponse with user_id and message
-
-    Raises:
-        HTTPException 400: If code is invalid or expired
-        HTTPException 500: If database error occurs
+    Verify signup OTP (stored in DB) and activate account.
+    Rate-limited: 5 attempts per 10 minutes per IP to prevent brute-force.
     """
-    # Clean up expired codes
-    cleanup_expired_codes()
-
-    # Verify the code and get user data
-    success, result = verify_code(request.email, request.code)
-
+    success, result = UserModel.verify_and_activate(db, body.email, body.code)
     if not success:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=result  # Error message
+            detail=result,
         )
 
-    # result is now the user data dict
-    user_data = result
-
-    # Create user
-    success, user_id = UserModel.create_user(
-        first_name=user_data['first_name'],
-        last_name=user_data['last_name'],
-        email=user_data['email'],
-        password=user_data['password'],
-        role_type=1  # Default: normal user
-    )
-
-    if not success:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Error creating account"
-        )
-
-    # Create default study background
-    StudyBGModel.create_default(user_id)
-
-    # Mark email as verified (since they verified the code)
-    UserModel.verify_email(user_id)
+    # Create default study background for the newly activated user
+    StudyBGModel.create_default(db, result)
 
     return VerifyCodeResponse(
-        message="Account created successfully! You can now log in.",
-        user_id=user_id,
-        requires_email_verification=False
+        message="Account created successfully! You can now log in."
     )
 
 
 @router.post("/login", response_model=Token)
-async def login(login_data: LoginRequest):
+@limiter.limit("10/minute")
+async def login(request: Request, login_data: LoginRequest, db: Session = Depends(get_db)):
     """
     Login and receive JWT tokens.
 
@@ -177,12 +136,19 @@ async def login(login_data: LoginRequest):
         HTTPException 403: If email is not verified
     """
     # Get user by email
-    user = UserModel.get_user_by_email(login_data.email)
+    user = UserModel.get_user_by_email(db, login_data.email)
 
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password"
+        )
+
+    # Block closed accounts
+    if not user.get('is_active', True):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This account has been closed"
         )
 
     # Verify password
@@ -191,14 +157,6 @@ async def login(login_data: LoginRequest):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password"
         )
-
-    # Check if email is verified (if verification is enabled)
-    if settings.EMAIL_VERIFICATION_ENABLED:
-        if not user.get('email_verified', False):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Please verify your email first"
-            )
 
     # Create tokens
     access_token = create_access_token(data={"sub": str(user['id'])})
@@ -313,3 +271,73 @@ async def logout(token_data: TokenRefresh):
         # Continue anyway
 
     return MessageResponse(message="Logout successful")
+
+
+@router.post("/forgot-password/send-code", response_model=MessageResponse)
+@limiter.limit("3/minute")
+async def forgot_password_send_code(request: Request, data: ForgotPasswordSendCodeRequest, db: Session = Depends(get_db)):
+    """
+    Send 6-digit reset code to email. Code stored in DB — safe across restarts.
+    Rate-limited: 3 requests per minute per IP.
+    """
+    user = UserModel.get_user_by_email(db, data.email)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Email has not been registered"
+        )
+
+    code = ''.join(random.choices(string.digits, k=6))
+    expiry = datetime.now() + timedelta(minutes=10)
+
+    stored = UserModel.store_reset_code(db, user.id, code, expiry)
+    if not stored:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to save verification code. Please try again."
+        )
+
+    email_sent = send_verification_code_email(data.email, user.first_name or "User", code)
+    if not email_sent:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to send email. Please try again."
+        )
+
+    return MessageResponse(message="Verification code sent to your email")
+
+
+@router.post("/forgot-password/reset", response_model=MessageResponse)
+@limiter.limit("5/10minutes")
+async def forgot_password_reset(request: Request, data: ForgotPasswordResetRequest, db: Session = Depends(get_db)):
+    """
+    Verify reset OTP (from DB) and update password.
+    Rate-limited: 5 attempts per 10 minutes per IP.
+    """
+    if data.new_password != data.confirm_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Passwords do not match"
+        )
+
+    if len(data.new_password) < 6:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must be at least 6 characters"
+        )
+
+    ok, result = UserModel.verify_reset_code(db, data.email, data.code)
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=result,
+        )
+
+    success, msg = UserModel.update_password(db, result, data.new_password)
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update password"
+        )
+
+    return MessageResponse(message="Password reset successfully")

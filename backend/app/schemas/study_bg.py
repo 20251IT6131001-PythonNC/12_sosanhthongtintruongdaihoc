@@ -30,7 +30,7 @@ class LanguageTestsBase(BaseModel):
     toefl: Optional[int] = Field(None, ge=0, le=120)
     pearson_test: Optional[int] = Field(None, ge=10, le=90)
     cam_adv_test: Optional[int] = Field(None, ge=0, le=230)
-    inter_bac: Optional[str] = None
+    inter_bac: Optional[float] = Field(None, ge=0, le=45)
 
 
 class StudyBGCreate(StudyBGBase, TestScoresBase, LanguageTestsBase):
@@ -55,7 +55,7 @@ class StudyBGUpdate(BaseModel):
     toefl: Optional[int] = Field(None, ge=0, le=120)
     pearson_test: Optional[int] = Field(None, ge=10, le=90)
     cam_adv_test: Optional[int] = Field(None, ge=0, le=230)
-    inter_bac: Optional[str] = None
+    inter_bac: Optional[float] = Field(None, ge=0, le=45)
 
 
 class StudyBGResponse(StudyBGBase, TestScoresBase, LanguageTestsBase):
